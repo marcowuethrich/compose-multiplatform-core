@@ -70,7 +70,8 @@ internal class SurfaceMetalRedrawer(
     private val device = metalLayer.device as? MTLDeviceProtocol
         ?: throw IllegalStateException("MetalRedrawer requires MTLDevice")
     private val queue = getCachedCommandQueue(device)
-    private val context = DirectContext.makeMetal(device.objcPtr(), queue.objcPtr())
+    // Created for the first frame, and again after drainSkiaSurfaces released it.
+    private var context: DirectContext? = null
     private val pictureRecorder = PictureRecorder()
     private val transactionQueue = InteropTransactionQueue()
 
@@ -144,13 +145,17 @@ internal class SurfaceMetalRedrawer(
     private var isDisposed = false
 
     /**
-     * Closes all Skia surfaces and render targets that are currently associated with drawables.
+     * Closes all Skia surfaces and render targets that are currently associated with drawables,
+     * and the Skia context: it keeps GPU memory (offscreen layer textures, glyph atlases) for as
+     * long as it lives. The next frame creates a new context.
      */
     fun drainSkiaSurfaces() {
         check(NSThread.isMainThread) { "SurfaceMetalRedrawer.drainSkiaSurfaces() must be called on main thread" }
         awaitRenderingQueueTasksCompletion()
         metalLayer.drainDrawables()
         disposeDrawableAssociatedResources(metalLayer.drawablesGeneration.toInt())
+        context?.close()
+        context = null
     }
 
     override fun dispose() {
@@ -166,7 +171,7 @@ internal class SurfaceMetalRedrawer(
         awaitRenderingQueueTasksCompletion()
         disposeDrawableAssociatedResources(null)
         pictureRecorder.close()
-        context.close()
+        context?.close()
     }
 
     private fun awaitRenderingQueueTasksCompletion() {
@@ -335,6 +340,9 @@ internal class SurfaceMetalRedrawer(
             height = IOSurfaceGetHeight(drawable.surface).toInt(),
             texturePtr = drawable.drawableTexture().rawValue,
         )
+
+        val context = context
+            ?: DirectContext.makeMetal(device.objcPtr(), queue.objcPtr()).also { this.context = it }
 
         val surface = Surface.makeFromBackendRenderTarget(
             context,
